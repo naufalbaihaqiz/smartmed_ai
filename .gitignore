@@ -1,0 +1,27 @@
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Python Cache & Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables 
+.env
+.env.local
+
+# IDE / Code Editor 
+.vscode/
+.idea/
+*.swp
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+
+# Logs & Databases (Opsional, jika kamu pakai database lokal SQLite)
+*.log
+*.sqlite3
+db.sqlite3
