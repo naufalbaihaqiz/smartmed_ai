@@ -101,6 +101,16 @@ def post_process_schedules(request: ScheduleRequest, ai_reminders: list) -> list
         for rem in ai_reminders:
             dt = _parse_time_from_str(rem.get("schedule_at", "07:00:00"))
             meal_cat = _meal_name_from_time(dt)
+            if meal_cat == "Waktu Makan Malam" and "jam_tidur" in request.rutinitas:
+                try:
+                    parts = str(request.rutinitas["jam_tidur"]).strip().split(":")
+                    sh = int(parts[0]) if len(parts) > 0 else 22
+                    sm = int(parts[1]) if len(parts) > 1 else 0
+                    max_dinner_dt = datetime(dt.year, dt.month, dt.day, sh, sm) - timedelta(hours=2)
+                    if dt > max_dinner_dt:
+                        dt = max_dinner_dt
+                except Exception:
+                    pass
             day_key = (dt.date(), meal_cat)
             if day_key in seen_day_categories:
                 continue
@@ -199,6 +209,18 @@ def post_process_schedules(request: ScheduleRequest, ai_reminders: list) -> list
                 earliest_after = min(m["dt"] for m in after_eat)
                 meal_time = earliest_after - timedelta(minutes=30)
 
+            # Pastikan aturan klinis: Makan malam paling lama 2 jam sebelum jam tidur
+            if s_id == "malam" and "jam_tidur" in request.rutinitas:
+                try:
+                    parts = str(request.rutinitas["jam_tidur"]).strip().split(":")
+                    sh = int(parts[0]) if len(parts) > 0 else 22
+                    sm = int(parts[1]) if len(parts) > 1 else 0
+                    max_dinner_dt = datetime(meal_time.year, meal_time.month, meal_time.day, sh, sm) - timedelta(hours=2)
+                    if meal_time > max_dinner_dt:
+                        meal_time = max_dinner_dt
+                except Exception:
+                    pass
+
             # A. Obat sebelum makan: disinkronkan tepat 5 menit sebelum waktu makan sesi ini
             if before_eat:
                 med_time = meal_time - timedelta(minutes=5)
@@ -264,13 +286,18 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     --- INSTRUKSI DAN LOGIKA PENJADWALAN MUTLAK (WAJIB DIPATUHI TANPA KECUALI) ---
     1. KONDISI ADA RESEP OBAT:
        - AI HANYA AKAN MENGENERATE JADWAL MINUM OBAT. JANGAN buat jadwal makan di output AI (backend akan menambahkannya otomatis).
+       - ATURAN INTERVAL WAKTU KONSISTEN ANTARA JAM BANGUN DAN JAM TIDUR:
+         Frekuensi obat harian digunakan untuk membagi waktu aktif antara jam bangun tidur dan jam tidur pasien, menghasilkan jarak waktu yang konsisten antar jadwal minum obat:
+         * 1x sehari: 1 kali sehari di waktu yang sesuai (pagi saat sarapan, siang, atau malam).
+         * 2x sehari: 2 kali sehari berjarak konsisten (pagi sekitar sarapan dan malam sekitar makan malam, misal jeda 12 jam: 07:00 dan 19:00).
+         * 3x sehari: 3 kali sehari berjarak konsisten (pagi sekitar sarapan, siang sekitar makan siang, dan malam sekitar makan malam, misal jeda konsisten 6 jam: 07:00, 13:00, dan 19:00).
+         * 4x sehari: 4 kali sehari berjarak konsisten (misal jeda konsisten 4 jam: 07:00, 11:00, 15:00, 19:00).
        - Obat dengan status `isAfterEat` SAMA yang diminum di waktu yang sama boleh dijadwalkan pada jam yang sama.
        - Obat dengan status `isAfterEat` BERBEDA (sebelum makan vs setelah makan) DILARANG KERAS dijadwalkan di jam yang sama!
        - Jika ada obat sebelum makan dan obat sesudah makan di sesi yang sama (pagi, siang, atau malam), jadwalnya HARUS berjarak MINIMAL 35 MENIT (contoh: sebelum makan jam 07:00, sesudah makan jam 07:35).
-    2. KONDISI TANPA RESEP DOKTER:
-       - Bila TIDAK ada resep obat, susun jadwal makan harian (Sarapan, Makan Siang, Makan Malam) tanpa menyebutkan nama menu masakan (cukup 'Waktu Sarapan', 'Waktu Makan Siang', 'Waktu Makan Malam').
-    3. BATASAN RUTINITAS (WAKTU TIDUR):
-       - Anda dilarang membuat jadwal pada jam di mana pasien sedang tidur (lihat `rutinitas` untuk jam bangun dan tidur).
+    2. ATURAN MAKAN MALAM (MUTLAK):
+       - Waktu makan malam HARUS PALING LAMA (PALING LAMBAT) 2 JAM SEBELUM JAM TIDUR (contoh: jika jam_tidur 21:00, makan malam maksimal jam 19:00; jika jam_tidur 22:00, makan malam maksimal jam 20:00). Dilarang menjadwalkan makan malam kurang dari 2 jam sebelum tidur!
+       - DILARANG membuat jadwal pada saat jam tidur pasien!
     4. RELASI DATA & FORMAT:
        - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk pengingat minum obat.
        - Output HANYA raw JSON valid dengan keys: status, input_version, reminders, conflicts, questions.
