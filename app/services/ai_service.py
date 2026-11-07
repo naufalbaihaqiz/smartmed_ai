@@ -275,6 +275,54 @@ def post_process_schedules(request: ScheduleRequest, ai_reminders: list) -> list
     final_reminders.sort(key=lambda r: _parse_time_from_str(r["schedule_at"]))
     return final_reminders
 
+def _generate_synthetic_reminders(request: ScheduleRequest) -> list:
+    today = datetime.now().date()
+    wake_str = request.rutinitas.get("jam_bangun", "06:00")
+    sleep_str = request.rutinitas.get("jam_tidur", "21:00")
+    try:
+        wh, wm = [int(x) for x in str(wake_str).split(":")[:2]]
+    except Exception:
+        wh, wm = 6, 0
+    try:
+        sh, sm = [int(x) for x in str(sleep_str).split(":")[:2]]
+    except Exception:
+        sh, sm = 21, 0
+
+    max_dinner_dt = datetime(today.year, today.month, today.day, sh, sm) - timedelta(hours=2)
+    b_dt = datetime(today.year, today.month, today.day, min(wh + 1, 9), wm)
+    l_dt = datetime(today.year, today.month, today.day, 12, 30)
+    d_dt = max_dinner_dt
+
+    has_prescriptions = any(len(p.medications) > 0 for p in request.prescriptions)
+    if not has_prescriptions:
+        return [
+            {"prescription_id": None, "title": "Waktu Sarapan", "schedule_at": b_dt.strftime("%Y-%m-%dT%H:%M:%S"), "status": "pending", "reminder_items": []},
+            {"prescription_id": None, "title": "Waktu Makan Siang", "schedule_at": l_dt.strftime("%Y-%m-%dT%H:%M:%S"), "status": "pending", "reminder_items": []},
+            {"prescription_id": None, "title": "Waktu Makan Malam", "schedule_at": d_dt.strftime("%Y-%m-%dT%H:%M:%S"), "status": "pending", "reminder_items": []},
+        ]
+
+    reminders = []
+    for p in request.prescriptions:
+        for m in p.medications:
+            freq_str = (m.frequency or "1").lower()
+            if "3" in freq_str or "tiga" in freq_str:
+                target_times = [b_dt, l_dt, d_dt]
+            elif "2" in freq_str or "dua" in freq_str:
+                target_times = [b_dt, d_dt]
+            else:
+                target_times = [b_dt]
+
+            for base_time in target_times:
+                med_time = base_time + timedelta(minutes=30) if m.isAfterEat else base_time - timedelta(minutes=5)
+                reminders.append({
+                    "prescription_id": p.id,
+                    "title": f"Minum Obat: {m.medicine_name}",
+                    "schedule_at": med_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "status": "pending",
+                    "reminder_items": [{"medication_id": m.id}] if m.id is not None else []
+                })
+    return post_process_schedules(request, reminders)
+
 async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleResponse:
     prompt = f"""
     Anda adalah Sistem Pakar Penjadwalan TemanRawat yang bekerja dengan presisi logis mutlak dan menggunakan Bahasa Indonesia.
@@ -331,35 +379,43 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     }}
     """
     
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {
-                "role": "system", 
-                "content": (
-                    "You are a strict deterministic healthcare scheduling API. "
-                    "When prescriptions exist, generate ONLY medication reminders (never meal reminders). "
-                    "Medications with the same isAfterEat can share the same time. "
-                    "Medications with different isAfterEat MUST NOT be at the same time and MUST have at least 35 minutes gap in the same session. "
-                    "When NO prescriptions exist, generate meal reminders without recipe dish names (use 'Waktu Sarapan', 'Waktu Makan Siang', 'Waktu Makan Malam'). "
-                    "Respect sleep routines, strictly output in Indonesian language, "
-                    "and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."
-                )
-            },
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0, 
-        seed=42, 
-    )
-    
-    ai_data = json.loads(response.choices[0].message.content)
+    raw_reminders = []
+    ai_data = {}
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system", 
+                    "content": (
+                        "You are a strict deterministic healthcare scheduling API. "
+                        "When prescriptions exist, generate ONLY medication reminders (never meal reminders). "
+                        "Medications with the same isAfterEat can share the same time. "
+                        "Medications with different isAfterEat MUST NOT be at the same time and MUST have at least 35 minutes gap in the same session. "
+                        "When NO prescriptions exist, generate meal reminders without recipe dish names (use 'Waktu Sarapan', 'Waktu Makan Siang', 'Waktu Makan Malam'). "
+                        "Respect sleep routines, strictly output in Indonesian language, "
+                        "and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0, 
+            seed=42, 
+        )
+        ai_data = json.loads(response.choices[0].message.content)
+        raw_reminders = ai_data.get("reminders", [])
+    except Exception:
+        ai_data = {}
+
     ai_data["input_version"] = request.input_version
     ai_data.setdefault("status", "draft")
-    raw_reminders = ai_data.get("reminders", [])
     
     # Lakukan deterministic post-processing untuk menjamin kepatuhan 100% pada aturan 35 menit & jadwal makan otomatis
     processed_reminders = post_process_schedules(request, raw_reminders)
+    if not processed_reminders:
+        processed_reminders = _generate_synthetic_reminders(request)
+
     ai_data["reminders"] = processed_reminders
     ai_data.setdefault("conflicts", [])
     ai_data.setdefault("questions", [])

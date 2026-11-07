@@ -25,42 +25,43 @@ class Medication(BaseModel):
     id: Optional[int] = None
     prescription_id: Optional[int] = None
     medicine_name: str
-    dosage: str
-    frequency: str
-    instruction: str
-    quantity: int
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    instruction: Optional[str] = None
+    quantity: Optional[int] = 10
     notes: Optional[str] = None
-    isAfterEat: bool
+    isAfterEat: bool = False
+    dose_type: Optional[str] = "TABLET"
 
 class Prescription(BaseModel):
     id: Optional[int] = None
     prescription_date: str
     notes: Optional[str] = None
-    status: str
-    start_at: str
+    status: str = "active"
+    start_at: Optional[str] = "08:00"
     medications: List[Medication] = []
 
 class RecipeIngredient(BaseModel):
     id: Optional[int] = None
     recipe_id: Optional[int] = None
     ingredient_name: str
-    quantity: str
+    quantity: Optional[str] = None
 
 class RecipeNutrition(BaseModel):
     id: Optional[int] = None
     recipe_id: Optional[int] = None
-    calories: float
-    protein: float
-    carbohydrates: float
-    fat: float
+    calories: Optional[float] = 0.0
+    protein: Optional[float] = 0.0
+    carbohydrates: Optional[float] = 0.0
+    fat: Optional[float] = 0.0
 
 class Recipe(BaseModel):
     id: Optional[int] = None
     recipe_name: str
     description: Optional[str] = None
-    servings: int
-    cooking_time: int
-    instructions: str
+    servings: Optional[int] = 1
+    cooking_time: Optional[int] = 30
+    instructions: Optional[str] = None
     source: Optional[str] = None
     ingredients: List[RecipeIngredient] = []
     nutrition: Optional[RecipeNutrition] = None
