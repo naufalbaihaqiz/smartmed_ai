@@ -11,39 +11,39 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 
 async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanResponse:
     prompt = f"""
-    Anda adalah Sistem Pakar Diet Klinis TemanRawat yang bekerja dengan presisi matematis.
+    Anda adalah Sistem Pakar Diet Klinis TemanRawat yang bekerja dengan presisi matematis dan menggunakan Bahasa Indonesia.
     Berdasarkan data profil pasien berikut, rancang rencana menu makan harian.
 
     --- DATA INPUT PENGGUNA ---
     {request.model_dump_json(indent=2)}
     
     --- INSTRUKSI DAN LOGIKA KLINIS MUTLAK ---
-    1. BATAS MENU: Buat Harus 5 (lima) menu di dalam array 'meals' (misal: Sarapan, Makan Siang, Makan Malam, dan Selingan jika perlu).
+    1. BATAS MENU: Buat TEPAT 3 (tiga) menu di dalam array 'meals' (yaitu: Sarapan, Makan Siang, dan Makan Malam). Jangan lebih dan jangan kurang jika budget mencukupi.
     2. ANALISIS ALERGI & PENYAKIT: 
        - Anda dilarang keras memasukkan bahan yang tercantum di dalam daftar `allergies`.
        - Sesuaikan nilai gizi (`nutrition`) dan bahan dengan `condition_name` (misal: jika Hipertensi, kurangi garam/natrium; jika Diabetes, kurangi karbohidrat sederhana).
-    3. PENILAIAN ANGGARAN:
-       - Hitung estimasi harga bahan baku (ingredients) secara logis.
-       - Jika `budget` yang diberikan (dalam Rupiah) tidak masuk akal untuk membuat makanan yang layak gizi dalam sehari, JANGAN membuat menu fiktif. 
-       - Jika budget tidak cukup, ubah "status" menjadi "needs_clarification", KOSONGKAN array "meals", dan isi "questions" atau "review_notes" untuk meminta user menaikkan budget.
-    4. FORMAT DETERMINISTIK: Keluarkan output HANYA dalam bentuk JSON yang valid. Jangan gunakan blok kode markdown (```json).
+    3. PENYESUAIAN ANGGARAN (BUDGET):
+       - Batas MINIMAL budget harian adalah Rp 10.000.
+       - Jika `budget` di bawah Rp 10.000, Anda DILARANG membuat menu. Ubah "status" menjadi "needs_clarification", KOSONGKAN array "meals", dan isi "review_notes" dengan pesan peringatan untuk menaikkan budget menjadi minimal Rp 10.000.
+       - Jika `budget` Rp 10.000 atau lebih, Anda WAJIB membuatkan 3 menu (status "draft"). Gunakan bahan lokal super murah (tahu, tempe, telur, bayam) jika budget ngepas di angka belasan ribu.
+    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Semua nilai teks (nama resep, deskripsi, bahan, instruksi) WAJIB menggunakan Bahasa Indonesia baku. Jangan gunakan blok kode markdown (```json).
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
         "status": "draft",
         "meals": [
             {{
-                "recipe_name": "Sup Ayam Sayur Lunak",
-                "description": "Menu makan siang tinggi protein dan rendah natrium.",
+                "recipe_name": "Sup Tahu Bayam Bening",
+                "description": "Menu sarapan hemat tinggi zat besi dan protein nabati.",
                 "servings": 1,
-                "cooking_time": 30,
-                "instructions": "1. Rebus air... 2. Masukkan ayam dan sayuran...",
+                "cooking_time": 15,
+                "instructions": "1. Didihkan air... 2. Masukkan bawang merah dan bawang putih... 3. Tambahkan tahu dan bayam...",
                 "source": "Sistem AI TemanRawat",
                 "ingredients": [
-                    {{"ingredient_name": "Daging Ayam Fillet", "quantity": "100 gr"}},
-                    {{"ingredient_name": "Wortel", "quantity": "50 gr"}}
+                    {{"ingredient_name": "Tahu Putih", "quantity": "1 potong"}},
+                    {{"ingredient_name": "Bayam", "quantity": "1 ikat kecil"}}
                 ],
-                "nutrition": {{"calories": 250.5, "protein": 20.0, "carbohydrates": 10.0, "fat": 5.5}}
+                "nutrition": {{"calories": 120.0, "protein": 10.0, "carbohydrates": 5.0, "fat": 3.0}}
             }}
         ],
         "questions": [],
@@ -54,7 +54,7 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic clinical dietician API. You strictly follow rules, output a maximum of 5 meals, enforce budget constraints, and output ONLY raw JSON data."},
+            {"role": "system", "content": "You are a deterministic clinical dietician API. You strictly follow rules, output EXACTLY 3 meals, enforce a STRICT minimum budget of 10000 IDR (reject if lower), strictly output in Indonesian language, and output ONLY raw JSON data."},
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
@@ -66,7 +66,7 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
 
 async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleResponse:
     prompt = f"""
-    Anda adalah Sistem Pakar Penjadwalan TemanRawat yang bekerja dengan presisi logis.
+    Anda adalah Sistem Pakar Penjadwalan TemanRawat yang bekerja dengan presisi logis dan menggunakan Bahasa Indonesia.
     Berdasarkan data rutinitas, menu makan, dan resep obat pasien berikut, buatkan daftar pengingat (reminders) harian.
 
     --- DATA INPUT PENGGUNA ---
@@ -83,7 +83,7 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     3. RELASI DATA:
        - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk alarm yang bertemakan minum obat.
        - Untuk alarm makan, `prescription_id` biarkan null, dan `reminder_items` biarkan kosong.
-    4. FORMAT DETERMINISTIK: Keluarkan output HANYA dalam bentuk JSON yang valid. Jangan gunakan blok kode markdown (```json).
+    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia. Jangan gunakan blok kode markdown (```json).
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
@@ -116,7 +116,7 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, and output ONLY raw JSON data."},
+            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, strictly output in Indonesian language, and output ONLY raw JSON data."},
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
