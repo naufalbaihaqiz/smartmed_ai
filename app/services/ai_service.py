@@ -26,7 +26,7 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
        - Batas MINIMAL budget harian adalah Rp 10.000.
        - Jika `budget` di bawah Rp 10.000, Anda DILARANG membuat menu. Ubah "status" menjadi "needs_clarification", KOSONGKAN array "meals", dan isi "review_notes" dengan pesan peringatan untuk menaikkan budget menjadi minimal Rp 10.000.
        - Jika `budget` Rp 10.000 atau lebih, Anda WAJIB membuatkan 3 menu (status "draft"). Gunakan bahan lokal super murah (tahu, tempe, telur, bayam) jika budget ngepas di angka belasan ribu.
-    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Semua nilai teks (nama resep, deskripsi, bahan, instruksi) WAJIB menggunakan Bahasa Indonesia baku. Jangan gunakan blok kode markdown (```json).
+    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Key "status", "meals", "questions", dan "review_notes" WAJIB selalu ada di dalam JSON. Semua nilai teks WAJIB menggunakan Bahasa Indonesia baku. Jangan gunakan blok kode markdown (```json).
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
@@ -54,7 +54,7 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic clinical dietician API. You strictly follow rules, output EXACTLY 3 meals, enforce a STRICT minimum budget of 10000 IDR (reject if lower), strictly output in Indonesian language, and output ONLY raw JSON data."},
+            {"role": "system", "content": "You are a deterministic clinical dietician API. You strictly follow rules, output EXACTLY 3 meals, enforce a STRICT minimum budget of 10000 IDR (reject if lower), strictly output in Indonesian language, and output ONLY raw JSON data containing status, meals, questions, and review_notes."},
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
@@ -62,7 +62,13 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
         seed=42, 
     )
     
-    return MealPlanResponse.model_validate_json(response.choices[0].message.content)
+    ai_data = json.loads(response.choices[0].message.content)
+    ai_data.setdefault("status", "draft")
+    ai_data.setdefault("meals", [])
+    ai_data.setdefault("questions", [])
+    ai_data.setdefault("review_notes", [])
+    
+    return MealPlanResponse(**ai_data)
 
 async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleResponse:
     prompt = f"""
@@ -83,7 +89,7 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     3. RELASI DATA:
        - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk alarm yang bertemakan minum obat.
        - Untuk alarm makan, `prescription_id` biarkan null, dan `reminder_items` biarkan kosong.
-    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia. Jangan gunakan blok kode markdown (```json).
+    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Key "status", "input_version", "reminders", "conflicts", dan "questions" WAJIB selalu ditulis meskipun bernilai array kosong []. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia. Jangan gunakan blok kode markdown (```json).
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
@@ -116,7 +122,7 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, strictly output in Indonesian language, and output ONLY raw JSON data."},
+            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, strictly output in Indonesian language, and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."},
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
@@ -125,6 +131,10 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     )
     
     ai_data = json.loads(response.choices[0].message.content)
-    ai_data["input_version"] = request.input_version 
+    ai_data["input_version"] = request.input_version
+    ai_data.setdefault("status", "draft")
+    ai_data.setdefault("reminders", [])
+    ai_data.setdefault("conflicts", [])
+    ai_data.setdefault("questions", [])
     
     return ScheduleResponse(**ai_data)

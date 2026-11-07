@@ -75,7 +75,7 @@ class Reminder(BaseModel):
     prescription_id: Optional[int] = None
     title: str
     schedule_at: str
-    status: str
+    status: Optional[str] = "pending"
     reminder_items: List[ReminderItem] = []
 
 
@@ -87,16 +87,16 @@ class MealPlanRequest(BaseModel):
     request_id: str
     input_version: int
     health_condition: HealthCondition
-    allergies: List[Allergy]
+    allergies: List[Allergy] = []
     budget: float
-    preferensi: List[str]
+    preferensi: List[str] = []
 
 class ScheduleRequest(BaseModel):
     request_id: str
     input_version: int
-    menu_disetujui: List[Recipe]
-    prescriptions: List[Prescription]
-    rutinitas: dict
+    menu_disetujui: List[Recipe] = []
+    prescriptions: List[Prescription] = []
+    rutinitas: dict = {}
 
 
 # ==========================================
@@ -104,14 +104,14 @@ class ScheduleRequest(BaseModel):
 # ==========================================
 
 class MealPlanResponse(BaseModel):
-    status: str # "draft" atau "needs_clarification"
-    meals: List[Recipe]
-    questions: List[str]
-    review_notes: List[str]
+    status: str = "draft"  # "draft" atau "needs_clarification"
+    meals: List[Recipe] = []
+    questions: List[str] = []
+    review_notes: List[str] = []
 
 class ScheduleResponse(BaseModel):
-    status: str
-    input_version: int
-    reminders: List[Reminder]
-    conflicts: List[str]
-    questions: List[str]
+    status: str = "draft"
+    input_version: int = 1
+    reminders: List[Reminder] = []
+    conflicts: List[str] = []
+    questions: List[str] = []
