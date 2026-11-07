@@ -79,17 +79,19 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     {request.model_dump_json(indent=2)}
     
     --- INSTRUKSI DAN LOGIKA PENJADWALAN MUTLAK ---
-    1. SINKRONISASI OBAT DAN MAKANAN:
-       - Perhatikan properti `isAfterEat` pada tabel `medications`. 
-       - Jika `isAfterEat` adalah true, jadwalkan minum obat tersebut 15 hingga 30 menit SETELAH jadwal makan selesai.
-       - Jika tidak, jadwalkan sesuai instruksi (`instruction`) atau frekuensi (`frequency`).
-    2. BATASAN RUTINITAS (WAKTU):
+    1. JADWAL MAKAN WAJIB: 
+       - Anda WAJIB membuatkan jadwal (reminder) untuk SETIAP menu yang ada di dalam data `menu_disetujui`. 
+       - Jika ada 3 menu (Sarapan, Makan Siang, Makan Malam), maka WAJIB ada 3 jadwal makan yang dibuat.
+    2. SINKRONISASI OBAT DAN MAKANAN (SANGAT PENTING):
+       - Anda dilarang menumpuk jadwal obat dengan jam yang sama persis jika instruksinya berbeda (misal: satu Sebelum Makan dan satu Sesudah Makan).
+       - OBAT SESUDAH MAKAN (`isAfterEat` bernilai true): Jadwalkan 30 menit SETELAH jam makan.
+       - OBAT SEBELUM MAKAN (`isAfterEat` bernilai false): Jadwalkan TEPAT 5 MENIT SEBELUM jam makan (Contoh: Makan Siang 12:00, maka obat dijadwalkan pada 11:55).
+    3. ATURAN RESEP KADALUWARSA (LEWAT WAKTU):
+       - Perhatikan jam Anda membuat jadwal obat. Jika pasien mendapatkan/memasukkan data resep pada jam yang SUDAH MELEWATI jam makan (Contoh: Resep masuk jam 13:00, sedangkan jam makan siang adalah 12:00).
+       - Maka, Anda DILARANG membuat jadwal obat "Sebelum Makan" untuk makan siang tersebut. Abaikan jadwal minum obat untuk sesi yang sudah lewat.
+    4. BATASAN RUTINITAS (WAKTU):
        - Anda dilarang membuat jadwal (baik makan maupun minum obat) pada jam di mana pasien sedang tidur (lihat data `rutinitas` untuk jam bangun dan tidur).
-       - Jika ada obat yang frekuensinya memaksa pasien bangun di tengah malam, catat masalah ini di dalam array `conflicts`.
-    3. RELASI DATA:
-       - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk alarm yang bertemakan minum obat.
-       - Untuk alarm makan, `prescription_id` biarkan null, dan `reminder_items` biarkan kosong.
-    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Key "status", "input_version", "reminders", "conflicts", dan "questions" WAJIB selalu ditulis meskipun bernilai array kosong []. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia. Jangan gunakan blok kode markdown (```json).
+    5. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Key "status", "input_version", "reminders", "conflicts", dan "questions" WAJIB selalu ditulis meskipun bernilai array kosong []. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia.
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
@@ -97,20 +99,28 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
         "input_version": {request.input_version},
         "reminders": [
             {{
+                "prescription_id": 1,
+                "title": "Minum Obat Sebelum Makan: pcr",
+                "schedule_at": "2026-11-08T11:55:00",
+                "status": "pending",
+                "reminder_items": [
+                    {{"medication_id": 102}}
+                ]
+            }},
+            {{
                 "prescription_id": null,
-                "title": "Makan Pagi: Nasi Tim Telur",
-                "schedule_at": "2026-11-08T07:00:00",
+                "title": "Makan Siang: Nasi Tim Telur",
+                "schedule_at": "2026-11-08T12:00:00",
                 "status": "pending",
                 "reminder_items": []
             }},
             {{
                 "prescription_id": 1,
-                "title": "Minum Obat: Paracetamol & Amlodipine",
-                "schedule_at": "2026-11-08T07:30:00",
+                "title": "Minum Obat Sesudah Makan: pct",
+                "schedule_at": "2026-11-08T12:30:00",
                 "status": "pending",
                 "reminder_items": [
-                    {{"medication_id": 101}},
-                    {{"medication_id": 102}}
+                    {{"medication_id": 101}}
                 ]
             }}
         ],
@@ -122,7 +132,7 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, strictly output in Indonesian language, and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."},
+            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You MUST schedule ALL meals provided. For medications, if isAfterEat is true, schedule 30 mins AFTER the meal. If isAfterEat is false, strictly schedule EXACTLY 5 MINUTES BEFORE the meal time. Skip scheduling 'Before Meal' medications if the prescription time is later than the meal time. Output ONLY raw JSON data."},
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
