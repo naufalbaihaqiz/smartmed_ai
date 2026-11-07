@@ -1,6 +1,7 @@
 # Lokasi file: app/services/ai_service.py
 import os
 import json
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from groq import Groq
 from app.models.schemas import MealPlanRequest, MealPlanResponse, ScheduleRequest, ScheduleResponse
@@ -70,26 +71,209 @@ async def generate_meal_plan_from_ai(request: MealPlanRequest) -> MealPlanRespon
     
     return MealPlanResponse(**ai_data)
 
+def _meal_name_from_time(dt: datetime) -> str:
+    hour = dt.hour
+    if hour < 11:
+        return "Waktu Sarapan"
+    elif hour < 16:
+        return "Waktu Makan Siang"
+    else:
+        return "Waktu Makan Malam"
+
+def _parse_time_from_str(schedule_str: str) -> datetime:
+    try:
+        return datetime.fromisoformat(schedule_str.replace("Z", "+00:00"))
+    except Exception:
+        today = datetime.now().date()
+        parts = schedule_str.strip().split(":")
+        h = int(parts[0]) if len(parts) > 0 else 8
+        m = int(parts[1]) if len(parts) > 1 else 0
+        return datetime(today.year, today.month, today.day, h, m)
+
+def post_process_schedules(request: ScheduleRequest, ai_reminders: list) -> list:
+    has_prescriptions = any(len(p.medications) > 0 for p in request.prescriptions)
+    
+    # 1. Kasus Tanpa Resep Dokter:
+    # Hanya hasilkan jadwal makan tanpa nama masakan, dan TIDAK BOLEH ada kategori yang sama dalam 1 hari!
+    if not has_prescriptions:
+        clean_reminders = []
+        seen_day_categories = set()
+        for rem in ai_reminders:
+            dt = _parse_time_from_str(rem.get("schedule_at", "07:00:00"))
+            meal_cat = _meal_name_from_time(dt)
+            day_key = (dt.date(), meal_cat)
+            if day_key in seen_day_categories:
+                continue
+            seen_day_categories.add(day_key)
+            clean_reminders.append({
+                "prescription_id": None,
+                "title": meal_cat,
+                "schedule_at": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "status": rem.get("status", "pending"),
+                "reminder_items": []
+            })
+        clean_reminders.sort(key=lambda r: _parse_time_from_str(r["schedule_at"]))
+        return clean_reminders
+
+    # Kumpulkan kamus informasi obat untuk lookup cepat
+    med_info = {}
+    for p in request.prescriptions:
+        for m in p.medications:
+            if m.id is not None:
+                med_info[m.id] = m
+            med_info[m.medicine_name.lower().strip()] = m
+
+    # 2. Ambil hanya reminder obat dari AI
+    raw_med_reminders = []
+    for rem in ai_reminders:
+        items = rem.get("reminder_items", [])
+        title = rem.get("title", "").lower()
+        is_med = len(items) > 0 or rem.get("prescription_id") is not None or "minum" in title or "obat" in title
+        if is_med:
+            raw_med_reminders.append(rem)
+
+    # Ekstrak data obat & status isAfterEat per reminder
+    parsed_meds = []
+    for rem in raw_med_reminders:
+        dt = _parse_time_from_str(rem.get("schedule_at", "08:00:00"))
+        items = rem.get("reminder_items", [])
+        title = rem.get("title", "")
+        
+        matched_meds = []
+        for it in items:
+            m_id = it.get("medication_id")
+            if m_id in med_info:
+                matched_meds.append(med_info[m_id])
+        if not matched_meds:
+            for m_key, m_obj in med_info.items():
+                if isinstance(m_key, str) and m_key in title.lower():
+                    matched_meds.append(m_obj)
+        
+        is_after_eat = True
+        if matched_meds:
+            is_after_eat = matched_meds[0].isAfterEat
+            
+        parsed_meds.append({
+            "dt": dt,
+            "prescription_id": rem.get("prescription_id") or (request.prescriptions[0].id if request.prescriptions else None),
+            "med_objs": matched_meds,
+            "is_after_eat": is_after_eat,
+            "title": title
+        })
+
+    # 3. Kelompokkan per tanggal dan per sesi (Pagi, Siang, Malam).
+    # Dalam 1 hari HANYA ada 3 kategori makan (Sarapan, Makan Siang, Makan Malam).
+    # Tidak boleh ada kategori makan yang sama dalam 1 hari!
+    days_dict = {}
+    for pm in parsed_meds:
+        d = pm["dt"].date()
+        if d not in days_dict:
+            days_dict[d] = []
+        days_dict[d].append(pm)
+
+    final_reminders = []
+
+    for d, day_meds in days_dict.items():
+        # 3 sesi per hari:
+        # Pagi: jam < 11 -> Waktu Sarapan
+        # Siang: 11 <= jam < 16 -> Waktu Makan Siang
+        # Malam: jam >= 16 -> Waktu Makan Malam
+        sessions = [
+            ("pagi", "Waktu Sarapan", [m for m in day_meds if m["dt"].hour < 11]),
+            ("siang", "Waktu Makan Siang", [m for m in day_meds if 11 <= m["dt"].hour < 16]),
+            ("malam", "Waktu Makan Malam", [m for m in day_meds if m["dt"].hour >= 16]),
+        ]
+
+        for s_id, meal_title, s_meds in sessions:
+            if not s_meds:
+                continue
+
+            before_eat = [m for m in s_meds if not m["is_after_eat"]]
+            after_eat = [m for m in s_meds if m["is_after_eat"]]
+
+            # Tentukan SATU waktu makan tunggal untuk sesi ini
+            if before_eat:
+                earliest_before = min(m["dt"] for m in before_eat)
+                meal_time = earliest_before + timedelta(minutes=5)
+            else:
+                earliest_after = min(m["dt"] for m in after_eat)
+                meal_time = earliest_after - timedelta(minutes=30)
+
+            # A. Obat sebelum makan: disinkronkan tepat 5 menit sebelum waktu makan sesi ini
+            if before_eat:
+                med_time = meal_time - timedelta(minutes=5)
+                med_ids = []
+                med_names = []
+                presc_id = before_eat[0]["prescription_id"]
+                for m in before_eat:
+                    for obj in m["med_objs"]:
+                        if obj.id is not None and obj.id not in med_ids:
+                            med_ids.append(obj.id)
+                        if obj.medicine_name not in med_names:
+                            med_names.append(obj.medicine_name)
+                med_str = ", ".join(med_names) if med_names else "Obat Sebelum Makan"
+                final_reminders.append({
+                    "prescription_id": presc_id,
+                    "title": f"Minum Obat: {med_str}",
+                    "schedule_at": med_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "status": "pending",
+                    "reminder_items": [{"medication_id": mid} for mid in med_ids]
+                })
+
+            # B. Tambahkan TEPAT 1 JADWAL MAKAN untuk sesi ini (tidak boleh ada kategori yang sama dalam 1 hari)
+            final_reminders.append({
+                "prescription_id": None,
+                "title": meal_title,
+                "schedule_at": meal_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "status": "pending",
+                "reminder_items": []
+            })
+
+            # C. Obat sesudah makan: disinkronkan tepat 30 menit setelah waktu makan sesi ini
+            if after_eat:
+                med_time = meal_time + timedelta(minutes=30)
+                med_ids = []
+                med_names = []
+                presc_id = after_eat[0]["prescription_id"]
+                for m in after_eat:
+                    for obj in m["med_objs"]:
+                        if obj.id is not None and obj.id not in med_ids:
+                            med_ids.append(obj.id)
+                        if obj.medicine_name not in med_names:
+                            med_names.append(obj.medicine_name)
+                med_str = ", ".join(med_names) if med_names else "Obat Sesudah Makan"
+                final_reminders.append({
+                    "prescription_id": presc_id,
+                    "title": f"Minum Obat: {med_str}",
+                    "schedule_at": med_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "status": "pending",
+                    "reminder_items": [{"medication_id": mid} for mid in med_ids]
+                })
+
+    final_reminders.sort(key=lambda r: _parse_time_from_str(r["schedule_at"]))
+    return final_reminders
+
 async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleResponse:
     prompt = f"""
-    Anda adalah Sistem Pakar Penjadwalan TemanRawat yang bekerja dengan presisi logis dan menggunakan Bahasa Indonesia.
+    Anda adalah Sistem Pakar Penjadwalan TemanRawat yang bekerja dengan presisi logis mutlak dan menggunakan Bahasa Indonesia.
     Berdasarkan data rutinitas, menu makan, dan resep obat pasien berikut, buatkan daftar pengingat (reminders) harian.
 
     --- DATA INPUT PENGGUNA ---
     {request.model_dump_json(indent=2)}
     
-    --- INSTRUKSI DAN LOGIKA PENJADWALAN MUTLAK ---
-    1. SINKRONISASI OBAT DAN MAKANAN:
-       - Perhatikan properti `isAfterEat` pada tabel `medications`. 
-       - Jika `isAfterEat` adalah true, jadwalkan minum obat tersebut 15 hingga 30 menit SETELAH jadwal makan selesai.
-       - Jika tidak, jadwalkan sesuai instruksi (`instruction`) atau frekuensi (`frequency`).
-    2. BATASAN RUTINITAS (WAKTU):
-       - Anda dilarang membuat jadwal (baik makan maupun minum obat) pada jam di mana pasien sedang tidur (lihat data `rutinitas` untuk jam bangun dan tidur).
-       - Jika ada obat yang frekuensinya memaksa pasien bangun di tengah malam, catat masalah ini di dalam array `conflicts`.
-    3. RELASI DATA:
-       - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk alarm yang bertemakan minum obat.
-       - Untuk alarm makan, `prescription_id` biarkan null, dan `reminder_items` biarkan kosong.
-    4. FORMAT DETERMINISTIK & BAHASA: Keluarkan output HANYA dalam bentuk JSON yang valid. Key "status", "input_version", "reminders", "conflicts", dan "questions" WAJIB selalu ditulis meskipun bernilai array kosong []. Semua judul dan catatan WAJIB menggunakan Bahasa Indonesia. Jangan gunakan blok kode markdown (```json).
+    --- INSTRUKSI DAN LOGIKA PENJADWALAN MUTLAK (WAJIB DIPATUHI TANPA KECUALI) ---
+    1. KONDISI ADA RESEP OBAT:
+       - AI HANYA AKAN MENGENERATE JADWAL MINUM OBAT. JANGAN buat jadwal makan di output AI (backend akan menambahkannya otomatis).
+       - Obat dengan status `isAfterEat` SAMA yang diminum di waktu yang sama boleh dijadwalkan pada jam yang sama.
+       - Obat dengan status `isAfterEat` BERBEDA (sebelum makan vs setelah makan) DILARANG KERAS dijadwalkan di jam yang sama!
+       - Jika ada obat sebelum makan dan obat sesudah makan di sesi yang sama (pagi, siang, atau malam), jadwalnya HARUS berjarak MINIMAL 35 MENIT (contoh: sebelum makan jam 07:00, sesudah makan jam 07:35).
+    2. KONDISI TANPA RESEP DOKTER:
+       - Bila TIDAK ada resep obat, susun jadwal makan harian (Sarapan, Makan Siang, Makan Malam) tanpa menyebutkan nama menu masakan (cukup 'Waktu Sarapan', 'Waktu Makan Siang', 'Waktu Makan Malam').
+    3. BATASAN RUTINITAS (WAKTU TIDUR):
+       - Anda dilarang membuat jadwal pada jam di mana pasien sedang tidur (lihat `rutinitas` untuk jam bangun dan tidur).
+    4. RELASI DATA & FORMAT:
+       - Pastikan `medication_id` dimasukkan ke dalam array `reminder_items` untuk pengingat minum obat.
+       - Output HANYA raw JSON valid dengan keys: status, input_version, reminders, conflicts, questions.
 
     --- FORMAT OUTPUT JSON WAJIB (SESUAI SCHEMA) ---
     {{
@@ -97,19 +281,20 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
         "input_version": {request.input_version},
         "reminders": [
             {{
-                "prescription_id": null,
-                "title": "Makan Pagi: Nasi Tim Telur",
+                "prescription_id": 1,
+                "title": "Minum Obat: Omeprazole",
                 "schedule_at": "2026-11-08T07:00:00",
                 "status": "pending",
-                "reminder_items": []
+                "reminder_items": [
+                    {{"medication_id": 101}}
+                ]
             }},
             {{
                 "prescription_id": 1,
-                "title": "Minum Obat: Paracetamol & Amlodipine",
-                "schedule_at": "2026-11-08T07:30:00",
+                "title": "Minum Obat: Paracetamol",
+                "schedule_at": "2026-11-08T07:35:00",
                 "status": "pending",
                 "reminder_items": [
-                    {{"medication_id": 101}},
                     {{"medication_id": 102}}
                 ]
             }}
@@ -122,7 +307,18 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "You are a deterministic healthcare scheduling API. You map medication constraints to meal times, respect sleeping routines, strictly output in Indonesian language, and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."},
+            {
+                "role": "system", 
+                "content": (
+                    "You are a strict deterministic healthcare scheduling API. "
+                    "When prescriptions exist, generate ONLY medication reminders (never meal reminders). "
+                    "Medications with the same isAfterEat can share the same time. "
+                    "Medications with different isAfterEat MUST NOT be at the same time and MUST have at least 35 minutes gap in the same session. "
+                    "When NO prescriptions exist, generate meal reminders without recipe dish names (use 'Waktu Sarapan', 'Waktu Makan Siang', 'Waktu Makan Malam'). "
+                    "Respect sleep routines, strictly output in Indonesian language, "
+                    "and output ONLY raw JSON data containing status, input_version, reminders, conflicts, and questions."
+                )
+            },
             {"role": "user", "content": prompt}
         ],
         response_format={"type": "json_object"},
@@ -133,7 +329,11 @@ async def generate_schedule_from_ai(request: ScheduleRequest) -> ScheduleRespons
     ai_data = json.loads(response.choices[0].message.content)
     ai_data["input_version"] = request.input_version
     ai_data.setdefault("status", "draft")
-    ai_data.setdefault("reminders", [])
+    raw_reminders = ai_data.get("reminders", [])
+    
+    # Lakukan deterministic post-processing untuk menjamin kepatuhan 100% pada aturan 35 menit & jadwal makan otomatis
+    processed_reminders = post_process_schedules(request, raw_reminders)
+    ai_data["reminders"] = processed_reminders
     ai_data.setdefault("conflicts", [])
     ai_data.setdefault("questions", [])
     
